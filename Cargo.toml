@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/engine", "crates/game"]
+
+[workspace.dependencies]
+winit = "0.30"
+wgpu = "29.0"
+pollster = "0.3"
+env_logger = "0.11"
+log = "0.4"
+anyhow = "1.0"
