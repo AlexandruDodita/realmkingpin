@@ -14,20 +14,30 @@ pub struct State {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    pub pipeline: wgpu::RenderPipeline,
+    texture_bind_group_layout: wgpu::BindGroupLayout,
     mesh: Mesh,
+    texture: Texture,
 }
 
 pub struct Mesh {
     pub vertex_buffer: wgpu::Buffer,
-    pub vertex_count: u32,
+    // pub vertex_count: u32,
     pub index_buffer: wgpu::Buffer,
     pub index_count: u32,
-    pub pipeline: wgpu::RenderPipeline,
+    // pub pipeline: wgpu::RenderPipeline,
+    // pub bind_group: wgpu::BindGroup,
+}
+
+pub struct Texture {
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub sampler: wgpu::Sampler,
     pub bind_group: wgpu::BindGroup,
 }
 
 impl Mesh {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, _format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device) -> Self {
         
         //position x,y, uv u,v
         let vertices: [f32; 16] = [
@@ -53,17 +63,27 @@ impl Mesh {
             contents: bytemuck::cast_slice(&indices),
             usage: wgpu::BufferUsages::INDEX,
         });
-        let vertex_count = vertices.len() as u32 / 2;
+        // let vertex_count = vertices.len() as u32 / 2; // unused since we switched to indexed drawing, but might be useful later if we add non-indexed meshes
         let index_count = indices.len() as u32;
+      
 
-        //image decoding
-        let img = image::load_from_memory(include_bytes!("test.png")).expect("Failed to load image").to_rgba8();
+        Self { vertex_buffer, /*vertex_count,*/ index_buffer, index_count, }
+    }
+}
+
+impl Texture {
+    pub fn from_bytes(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        bytes: &[u8],
+        bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> anyhow::Result<Self> {
+        let img = image::load_from_memory(bytes)?.to_rgba8();
         let (tex_w, tex_h) = img.dimensions();
         let tex_size = wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 };
 
-        // create and upload texture
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Test Texture"),
+            label: Some("Texture"),
             size: tex_size,
             mip_level_count: 1,
             sample_count: 1,
@@ -73,14 +93,14 @@ impl Mesh {
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { //used to be ImageCopyTexture
+            wgpu::TexelCopyTextureInfo {
                 texture: &texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
             &img,
-            wgpu::TexelCopyBufferLayout { // used to be ImageDataLayout
+            wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(4 * tex_w),
                 rows_per_image: Some(tex_h),
@@ -95,8 +115,56 @@ impl Mesh {
             ..Default::default()
         });
 
-        //bind group layout - descirbes the shape
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Texture Bind Group"),
+            layout: bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        Ok(Self { texture, view, sampler, bind_group })
+    }
+}
+
+impl State {
+    pub fn new(window: Arc<Window>) -> anyhow::Result<Self> {
+        let size = window.inner_size();
+        let width = size.width.max(1);
+        let height = size.height.max(1);
+
+
+        let instance = wgpu::Instance::default();
+
+        // The Arc<Window> is owned by the surface, so this is Surface<'static>.
+        let surface = instance.create_surface(window.clone())?;
+
+        // request_adapter / request_device are async; block on them with pollster.
+        let adapter = pollster::block_on(instance.request_adapter(
+            &wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::default(),
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            },
+        ))?;
+
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
+
+        let config = surface
+            .get_default_config(&adapter, width, height)
+            .ok_or_else(|| anyhow::anyhow!("surface not supported by this adapter"))?;
+        surface.configure(&device, &config);
+
+        let mesh = Mesh::new(&device);
+        let texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Texture Bind Group Layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -117,26 +185,9 @@ impl Mesh {
                 },
             ],
         });
-
-        // bind group - actual resources
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Texture Bind Group"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Mesh Pipeline Layout"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
+            bind_group_layouts: &[Some(&texture_bind_group_layout)],
             immediate_size: 0, //replaces push_constant_ranges
         });
         
@@ -144,8 +195,6 @@ impl Mesh {
             label: Some("Mesh Shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shader.wgsl"))),
         });
-
-        
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Mesh Pipeline"),
@@ -175,7 +224,7 @@ impl Mesh {
                 entry_point: Some("fs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: _format, // match surface config
+                    format: config.format, // match surface config
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -189,43 +238,13 @@ impl Mesh {
             multiview_mask: None,
             cache: None,
         });
-
-        Self { vertex_buffer, vertex_count, index_buffer, index_count, pipeline, bind_group }
-    }
-}
-
-impl State {
-    pub fn new(window: Arc<Window>) -> anyhow::Result<Self> {
-        let size = window.inner_size();
-        let width = size.width.max(1);
-        let height = size.height.max(1);
-
-        let instance = wgpu::Instance::default();
-
-        // The Arc<Window> is owned by the surface, so this is Surface<'static>.
-        let surface = instance.create_surface(window.clone())?;
-
-        // request_adapter / request_device are async; block on them with pollster.
-        let adapter = pollster::block_on(instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            },
-        ))?;
-
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))?;
-
-        let config = surface
-            .get_default_config(&adapter, width, height)
-            .ok_or_else(|| anyhow::anyhow!("surface not supported by this adapter"))?;
-        surface.configure(&device, &config);
-
-        let mesh = Mesh::new(&device, &queue, config.format);
+        let texture = Texture::from_bytes(&device, &queue, include_bytes!("test.png"), &texture_bind_group_layout)?;
 
         println!("State created: {width}x{height}, format {:?}", config.format);
-        Ok(Self { window, surface, device, queue, config, mesh })
+
+
+
+        Ok(Self { window, surface, device, queue, config, mesh, pipeline, texture_bind_group_layout, texture })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -255,6 +274,11 @@ impl State {
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        
+
+        
+
+        
 
         {
             // This clear is what actually draws to the window. Without it the
@@ -277,8 +301,8 @@ impl State {
                 })],
                 ..Default::default()
             });
-            render_pass.set_pipeline(&self.mesh.pipeline);
-            render_pass.set_bind_group(0, &self.mesh.bind_group, &[]);
+            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &self.texture.bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.mesh.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.mesh.index_count, 0, 0..1);
