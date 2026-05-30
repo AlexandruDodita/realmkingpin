@@ -20,43 +20,153 @@ pub struct State {
 pub struct Mesh {
     pub vertex_buffer: wgpu::Buffer,
     pub vertex_count: u32,
+    pub index_buffer: wgpu::Buffer,
+    pub index_count: u32,
     pub pipeline: wgpu::RenderPipeline,
+    pub bind_group: wgpu::BindGroup,
 }
 
 impl Mesh {
-    pub fn new(device: &wgpu::Device, _format: wgpu::TextureFormat) -> Self {
-        let vertices: [f32; 6] = [
-            0.0, 0.5,  // top
-            -0.5, -0.5, // bottom left
-            0.5, -0.5,  // bottom right
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, _format: wgpu::TextureFormat) -> Self {
+        
+        //position x,y, uv u,v
+        let vertices: [f32; 16] = [
+            -0.5, 0.5, 0.0, 0.0, // top left
+            0.5, 0.5, 1.0, 0.0,  // top right
+            -0.5, -0.5, 0.0, 1.0, // bottom left
+            0.5, -0.5, 1.0, 1.0,  // bottom right
         ];
+
+        let indices: [u16; 6] = [
+            0, 1, 2, // first triangle
+            2, 1, 3, // second triangle
+        ];
+
         let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
             label: Some("Vertex Buffer"),
             contents: bytemuck::cast_slice(&vertices),
             usage: wgpu::BufferUsages::VERTEX,
         });
 
+        let index_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        let vertex_count = vertices.len() as u32 / 2;
+        let index_count = indices.len() as u32;
+
+        //image decoding
+        let img = image::load_from_memory(include_bytes!("test.png")).expect("Failed to load image").to_rgba8();
+        let (tex_w, tex_h) = img.dimensions();
+        let tex_size = wgpu::Extent3d { width: tex_w, height: tex_h, depth_or_array_layers: 1 };
+
+        // create and upload texture
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Test Texture"),
+            size: tex_size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { //used to be ImageCopyTexture
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &img,
+            wgpu::TexelCopyBufferLayout { // used to be ImageDataLayout
+                offset: 0,
+                bytes_per_row: Some(4 * tex_w),
+                rows_per_image: Some(tex_h),
+            },
+            tex_size,
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        //bind group layout - descirbes the shape
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Texture Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        // bind group - actual resources
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Texture Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Mesh Pipeline Layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0, //replaces push_constant_ranges
+        });
+        
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Mesh Shader"),
             source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shader.wgsl"))),
         });
 
-        let vertex_count = vertices.len() as u32 / 2;
+        
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Mesh Pipeline"),
-            layout: None,
+            layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 2 * std::mem::size_of::<f32>() as wgpu::BufferAddress,
+                    array_stride: 4 * std::mem::size_of::<f32>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
+                    attributes: 
+                    &[wgpu::VertexAttribute {
                         format: wgpu::VertexFormat::Float32x2,
                         offset: 0,
                         shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 2 * std::mem::size_of::<f32>() as wgpu::BufferAddress,
+                        shader_location: 1,
                     }],
                 }],
             },
@@ -80,7 +190,7 @@ impl Mesh {
             cache: None,
         });
 
-        Self { vertex_buffer, vertex_count, pipeline }
+        Self { vertex_buffer, vertex_count, index_buffer, index_count, pipeline, bind_group }
     }
 }
 
@@ -112,7 +222,7 @@ impl State {
             .ok_or_else(|| anyhow::anyhow!("surface not supported by this adapter"))?;
         surface.configure(&device, &config);
 
-        let mesh = Mesh::new(&device, config.format);
+        let mesh = Mesh::new(&device, &queue, config.format);
 
         println!("State created: {width}x{height}, format {:?}", config.format);
         Ok(Self { window, surface, device, queue, config, mesh })
@@ -168,8 +278,10 @@ impl State {
                 ..Default::default()
             });
             render_pass.set_pipeline(&self.mesh.pipeline);
+            render_pass.set_bind_group(0, &self.mesh.bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.mesh.vertex_buffer.slice(..));
-            render_pass.draw(0..self.mesh.vertex_count, 0..1);
+            render_pass.set_index_buffer(self.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..self.mesh.index_count, 0, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
