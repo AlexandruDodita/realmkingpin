@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use wgpu::util::{BufferInitDescriptor, DeviceExt};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -13,6 +14,74 @@ pub struct State {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    mesh: Mesh,
+}
+
+pub struct Mesh {
+    pub vertex_buffer: wgpu::Buffer,
+    pub vertex_count: u32,
+    pub pipeline: wgpu::RenderPipeline,
+}
+
+impl Mesh {
+    pub fn new(device: &wgpu::Device, _format: wgpu::TextureFormat) -> Self {
+        let vertices: [f32; 6] = [
+            0.0, 0.5,  // top
+            -0.5, -0.5, // bottom left
+            0.5, -0.5,  // bottom right
+        ];
+        let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Mesh Shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!("shader.wgsl"))),
+        });
+
+        let vertex_count = vertices.len() as u32 / 2;
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Mesh Pipeline"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: 2 * std::mem::size_of::<f32>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    }],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: _format, // match surface config
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        Self { vertex_buffer, vertex_count, pipeline }
+    }
 }
 
 impl State {
@@ -43,8 +112,10 @@ impl State {
             .ok_or_else(|| anyhow::anyhow!("surface not supported by this adapter"))?;
         surface.configure(&device, &config);
 
+        let mesh = Mesh::new(&device, config.format);
+
         println!("State created: {width}x{height}, format {:?}", config.format);
-        Ok(Self { window, surface, device, queue, config })
+        Ok(Self { window, surface, device, queue, config, mesh })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -78,7 +149,8 @@ impl State {
         {
             // This clear is what actually draws to the window. Without it the
             // compositor never gets a committed buffer, so nothing shows.
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     depth_slice: None, // new field in wgpu 29
@@ -95,6 +167,9 @@ impl State {
                 })],
                 ..Default::default()
             });
+            render_pass.set_pipeline(&self.mesh.pipeline);
+            render_pass.set_vertex_buffer(0, self.mesh.vertex_buffer.slice(..));
+            render_pass.draw(0..self.mesh.vertex_count, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
