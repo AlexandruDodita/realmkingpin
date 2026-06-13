@@ -18,6 +18,7 @@ pub struct State {
     texture_bind_group_layout: wgpu::BindGroupLayout,
     mesh: Mesh,
     texture: Texture,
+    material: Material,
 }
 
 pub struct Mesh {
@@ -33,7 +34,12 @@ pub struct Texture {
     pub texture: wgpu::Texture,
     pub view: wgpu::TextureView,
     pub sampler: wgpu::Sampler,
+    // pub bind_group: wgpu::BindGroup,
+}
+
+pub struct Material {
     pub bind_group: wgpu::BindGroup,
+    //later: uniform buffer for params, handles to textures it references
 }
 
 impl Mesh {
@@ -76,7 +82,6 @@ impl Texture {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         bytes: &[u8],
-        bind_group_layout: &wgpu::BindGroupLayout,
     ) -> anyhow::Result<Self> {
         let img = image::load_from_memory(bytes)?.to_rgba8();
         let (tex_w, tex_h) = img.dimensions();
@@ -115,22 +120,43 @@ impl Texture {
             ..Default::default()
         });
 
+        // let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        //     label: Some("Texture Bind Group"),
+        //     layout: bind_group_layout,
+        //     entries: &[
+        //         wgpu::BindGroupEntry {
+        //             binding: 0,
+        //             resource: wgpu::BindingResource::TextureView(&view),
+        //         },
+        //         wgpu::BindGroupEntry {
+        //             binding: 1,
+        //             resource: wgpu::BindingResource::Sampler(&sampler),
+        //         },
+        //     ],
+        // });
+
+        Ok(Self { texture, view, sampler /*, bind_group*/ })
+    }
+}
+
+impl Material {
+    pub fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, texture: &Texture) -> Self {
+        // For now the material just wraps a bind group, but later it might also own a uniform buffer for params, handles to textures it references, etc.
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Texture Bind Group"),
-            layout: bind_group_layout,
+            label: Some("Material Bind Group"),
+            layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
+                    resource: wgpu::BindingResource::TextureView(&texture.view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
+                    resource: wgpu::BindingResource::Sampler(&texture.sampler),
                 },
             ],
         });
-
-        Ok(Self { texture, view, sampler, bind_group })
+        Self { bind_group }
     }
 }
 
@@ -238,13 +264,14 @@ impl State {
             multiview_mask: None,
             cache: None,
         });
-        let texture = Texture::from_bytes(&device, &queue, include_bytes!("test.png"), &texture_bind_group_layout)?;
+        let texture = Texture::from_bytes(&device, &queue, include_bytes!("test.png"))?;
+        let material = Material::new(&device, &texture_bind_group_layout, &texture);
 
         println!("State created: {width}x{height}, format {:?}", config.format);
 
 
 
-        Ok(Self { window, surface, device, queue, config, mesh, pipeline, texture_bind_group_layout, texture })
+        Ok(Self { window, surface, device, queue, config, mesh, pipeline, texture_bind_group_layout, texture, material })
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -302,7 +329,7 @@ impl State {
                 ..Default::default()
             });
             render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &self.texture.bind_group, &[]);
+            render_pass.set_bind_group(0, &self.material.bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.mesh.vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.mesh.index_count, 0, 0..1);
